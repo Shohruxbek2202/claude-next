@@ -1,0 +1,41 @@
+#!/bin/bash
+# Limit reached -> switch to the other profile and continue the latest conversation of this folder.
+# If the context is bigger than LIMIT tokens, run /compact first (the new account has no prompt cache, a big history is expensive).
+LIMIT=${CLAUDE_NEXT_LIMIT:-50000}
+# `!claude-next` inside Claude has no TTY: interactive claude can't start, so don't flip the profile either
+[ -t 0 ] && [ -t 1 ] || { echo "claude-next: run it in a normal terminal, not inside Claude with !"; exit 1; }
+state="$HOME/.claude-profile"
+cur=$(cat "$state" 2>/dev/null || echo 1)
+next=$([ "$cur" = 1 ] && echo 2 || echo 1)
+echo "$next" > "$state"
+
+# --continue picks the newest transcript of this folder; its last usage = current context size
+proj="$HOME/.claude/projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')"
+last=$(ls -t "$proj"/*.jsonl 2>/dev/null | head -1)
+tokens=0
+[ -n "$last" ] && tokens=$(python3 - "$last" <<'PY'
+import sys, json
+n = 0
+for line in open(sys.argv[1], errors="ignore"):
+    if '"usage"' not in line:
+        continue
+    try:
+        u = json.loads(line)["message"]["usage"]
+        n = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+    except Exception:
+        pass
+print(n)
+PY
+)
+
+cmd=claude; [ "$next" = 2 ] && cmd=claude2
+if [ -z "$last" ]; then
+  echo "→ profile $next · no conversation in this folder, starting a new one"
+  exec $cmd "$@"
+elif [ "$tokens" -ge "$LIMIT" ]; then
+  echo "→ profile $next · context ${tokens} tokens ≥ ${LIMIT} → continue with /compact"
+  exec $cmd --continue "$@" "/compact"
+else
+  echo "→ profile $next · context ${tokens} tokens → continue"
+  exec $cmd --continue "$@"
+fi
